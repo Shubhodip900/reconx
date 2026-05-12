@@ -1,0 +1,68 @@
+name: ReconX Quality Checks
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # 1. Spell Check & Formatting
+  lint-and-spell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Spelling
+        uses: crate-ci/typos@master # Extremely fast spell checker for code
+        with:
+          files: .
+
+      - name: Markdown Lint
+        uses: nosotroseasy/markdown-lint-check@v1
+        with:
+          config-file: ".github/linters/.markdownlint.json"
+
+  # 2. Go Quality Checks
+  go-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+          args: --timeout=5m
+
+  # 3. Rust Quality Checks (The Engine)
+  rust-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Format Check
+        run: cargo fmt --all -- --check
+
+      - name: Rust Clippy (Linter)
+        run: cargo clippy -- -D warnings
+
+  # 4. Proto Consistency Check
+  proto-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      
+      - name: Check Proto Breaking Changes
+        uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      # This ensures your proto files are valid and follow best practices
+      - run: buf lint
+        working-directory: proto
