@@ -1,0 +1,31 @@
+syntax = "proto3";
+package reconx.engine;
+
+import "common.proto";
+
+option go_package = "github.com/reconx/proto/engine";
+
+service ReconciliationEngine {
+    // Query the current state of a specific transaction (Rust Engine logic)
+    rpc GetReconState(StateRequest) returns (StateResponse);
+    
+    // Force the engine to re-evaluate specific records
+    rpc ReTriggerMatch(StateRequest) returns (StateResponse);
+}
+
+message StateRequest {
+    string transaction_ref = 1;
+}
+
+message StateResponse {
+    string transaction_ref = 1;
+    reconx.common.ReconStatus status = 2;
+    repeated MatchDetail details = 3; 
+    int64 last_updated = 4;
+}
+
+message MatchDetail {
+    string system_name = 1;
+    bytes data_captured = 2;
+    bool discrepancy_found = 3;
+}

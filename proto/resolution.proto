@@ -1,0 +1,33 @@
+syntax = "proto3";
+package reconx.resolution;
+
+import "common.proto";
+import "engine.proto";
+
+option go_package = "github.com/reconx/proto/resolution";
+
+service ResolutionService {
+    // Manual override: Human picks the 'Golden Record' when systems conflict
+    rpc ResolveManually(ResolutionRequest) returns (ResolutionResponse);
+    
+    // Retrieval for UI/Dashboard monitoring to show what needs fixing
+    rpc ListMismatches(FilterRequest) returns (stream reconx.engine.StateResponse);
+}
+
+message ResolutionRequest {
+    string transaction_ref = 1;
+    string chosen_source = 2; // The system name that is deemed correct
+    string resolution_reason = 3;
+    string resolver_id = 4;   // User ID or Service ID who performed the resolution
+}
+
+message ResolutionResponse {
+    bool success = 1;
+    reconx.common.ReconStatus new_status = 2;
+}
+
+message FilterRequest {
+    int32 page_size = 1;
+    string page_token = 2;
+    string source_filter = 3; // Filter by a specific source system
+}

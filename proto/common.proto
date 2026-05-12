@@ -1,0 +1,24 @@
+syntax = "proto3";
+package reconx.common;
+
+option go_package = "github.com/reconx/proto/common";
+
+enum ReconStatus {
+    STATUS_UNSPECIFIED = 0;
+    PENDING = 1;      // Waiting for matching record from other systems
+    MATCHED = 2;      // All systems agree
+    MISMATCHED = 3;   // Conflict detected
+    RESOLVED = 4;     // Manual/Auto resolution applied
+}
+
+message Metadata {
+    string source_system = 1;
+    string trace_id = 2;
+    map<string, string> tags = 3;
+    int64 ingested_at = 4;
+}
+
+message ErrorResponse {
+    string code = 1;
+    string message = 2;
+}

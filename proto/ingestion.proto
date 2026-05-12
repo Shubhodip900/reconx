@@ -1,0 +1,33 @@
+syntax = "proto3";
+package reconx.ingestion;
+
+import "common.proto";
+
+option go_package = "github.com/reconx/proto/ingestion";
+
+service IngestionService {
+    // Single record entry for real-time events
+    rpc SubmitRecord(IngestRequest) returns (IngestResponse);
+    
+    // High-performance batch streaming for legacy system syncs
+    rpc BulkStreamIngest(stream IngestRequest) returns (BulkSummary);
+}
+
+message IngestRequest {
+    string idempotency_key = 1; 
+    string transaction_ref = 2; // Unique identifier shared across systems
+    bytes payload = 3;          // Raw data (JSON/Protobuf/etc)
+    reconx.common.Metadata metadata = 4;
+}
+
+message IngestResponse {
+    string internal_id = 1;
+    bool success = 2;
+    reconx.common.ErrorResponse error = 3;
+}
+
+message BulkSummary {
+    int32 total_processed = 1;
+    int32 total_failed = 2;
+    int64 duration_ms = 3;
+}
