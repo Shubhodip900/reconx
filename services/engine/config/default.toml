@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ReconX Reconciliation Engine — default configuration
+#
+# Override any value with an environment variable using the pattern:
+#   RECONX_ENGINE__<SECTION>__<KEY>=value
+# Examples:
+#   RECONX_ENGINE__GRPC__PORT=50052
+#   RECONX_ENGINE__DATABASE__DSN=postgres://reconx:reconx@localhost/reconx
+#   RECONX_ENGINE__ENGINE__MATCH_STRATEGY=majority
+# ─────────────────────────────────────────────────────────────────────────────
+
+[grpc]
+# Port the gRPC server listens on.
+# The Ingestion Service uses 50051; the Engine uses 50052 to avoid conflicts.
+port = 50052
+
+[database]
+dsn              = "postgres://reconx:reconx@localhost:5432/reconx?sslmode=disable"
+max_connections  = 20
+min_connections  = 2
+# Seconds to wait for a connection from the pool
+connect_timeout_secs = 10
+# Seconds an idle connection is kept alive before being reaped
+idle_timeout_secs    = 300
+
+[metrics]
+# Port for the /metrics (Prometheus) and /health endpoints
+port = 9091
+
+[engine]
+# ── Polling ──────────────────────────────────────────────────────────────────
+# How often the background worker polls for new/pending transactions (seconds)
+poll_interval_secs = 5
+
+# Maximum number of transaction_refs to process per worker tick
+batch_size = 100
+
+# ── Amount tolerance ─────────────────────────────────────────────────────────
+# Percentage tolerance: 0.01 = 1%.  Two amounts are "close enough" if their
+# relative difference is within this threshold.
+amount_tolerance_pct = 0.0
+
+# Absolute tolerance: amounts within this fixed value are considered matched.
+# The engine uses max(pct_tolerance, abs_tolerance) per comparison.
+amount_tolerance_abs = "0.00"
+
+# ── Retry & timeout ───────────────────────────────────────────────────────────
+# Maximum reconciliation attempts before a transaction stays MISMATCHED
+max_retries = 3
+
+# Minimum seconds between retry attempts (exponential backoff is not applied;
+# this is a simple flat delay to prevent hot-looping)
+retry_backoff_secs = 30
+
+# Seconds after which a PENDING transaction is escalated to MISMATCHED even
+# if not all expected sources have arrived (prevents transactions staying
+# in PENDING forever when a source goes silent)
+pending_timeout_secs = 300
+
+# ── Source constraints ────────────────────────────────────────────────────────
+# If non-empty, the engine waits until ALL listed source systems have submitted
+# a record before reconciling.  Leave as empty list [] to reconcile any 2+ sources.
+# Example: expected_sources = ["vendor_portal", "erp_system", "payment_gateway"]
+expected_sources = []
+
+# ── Matching strategy ─────────────────────────────────────────────────────────
+# exact     — amounts must be byte-identical
+# tolerance — amounts within the configured tolerance are MATCHED
+# majority  — the source group with the most members wins; outliers are MISMATCHED
+match_strategy = "tolerance"
+
+[log]
+# Log level filter: trace | debug | info | warn | error
+level = "info"
+# Output format: json (structured, for production) | text (human-readable, for dev)
+format = "json"

@@ -1,0 +1,29 @@
+# Prometheus configuration for the ReconX stack.
+# All services expose /metrics on their dedicated metrics port.
+
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: reconx-local
+
+scrape_configs:
+  - job_name: reconx-ingestion
+    static_configs:
+      - targets: ["ingestion:9090"]
+    metrics_path: /metrics
+
+  - job_name: reconx-engine
+    static_configs:
+      - targets: ["engine:8081"]
+    metrics_path: /metrics
+
+  - job_name: reconx-resolution
+    static_configs:
+      - targets: ["resolution:9092"]
+    metrics_path: /metrics
+
+  - job_name: reconx-gateway
+    static_configs:
+      - targets: ["gateway:9093"]
+    metrics_path: /metrics

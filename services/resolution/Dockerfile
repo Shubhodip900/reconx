@@ -1,46 +1,44 @@
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
+# Build context is the repo root (set in docker-compose.yml).
+# All COPY paths are relative to that root.
 FROM golang:1.23-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /workspace
 
-# Cache module downloads separately from source code.
-# Copy go.mod files for both the service and the proto module it depends on.
+# Cache dependency downloads as a separate layer.
+# Copy go.mod for both the proto module and this service.
 COPY proto/gen/go/go.mod  proto/gen/go/go.sum  ./proto/gen/go/
-COPY services/ingestion/go.mod services/ingestion/go.sum ./services/ingestion/
+COPY services/resolution/go.mod ./services/resolution/
 
-# Download dependencies (cached layer)
-WORKDIR /workspace/services/ingestion
+WORKDIR /workspace/services/resolution
 RUN go mod download
 
-# Copy source code
+# Copy full source (proto stubs + service code).
 WORKDIR /workspace
 COPY proto/gen/go/   ./proto/gen/go/
-COPY services/ingestion/ ./services/ingestion/
+COPY services/resolution/ ./services/resolution/
 
-# Build the binary with security flags
-WORKDIR /workspace/services/ingestion
+WORKDIR /workspace/services/resolution
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build \
     -ldflags="-w -s -extldflags '-static'" \
-    -o /bin/reconx-ingestion ./cmd/
+    -o /bin/reconx-resolution ./cmd/
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
-# alpine (not scratch) so the Docker Compose health check can use wget.
 FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates tzdata wget
 
-COPY --from=builder /bin/reconx-ingestion /reconx-ingestion
+COPY --from=builder /bin/reconx-resolution /reconx-resolution
 
 # Service ports:
-#   50051 — gRPC (SubmitRecord / BulkStreamIngest)
-#   8080  — HTTP (webhooks / file upload / health)
-#   9090  — Prometheus metrics
-EXPOSE 50051 8080 9090
+#   50053 — gRPC (ResolveManually / ListMismatches)
+#   9092  — Prometheus metrics + /health
+EXPOSE 50053 9092
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
-    CMD wget -qO- http://localhost:8080/health || exit 1
+    CMD wget -qO- http://localhost:9092/health || exit 1
 
-ENTRYPOINT ["/reconx-ingestion"]
+ENTRYPOINT ["/reconx-resolution"]
