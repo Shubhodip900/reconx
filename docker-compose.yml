@@ -1,0 +1,170 @@
+# ReconX — full-stack Docker Compose
+#
+# Single-command startup:
+#   docker compose up
+#
+# Services and their ports:
+#   postgres    — 5432
+#   ingestion   — gRPC :50051 | HTTP :8080 | metrics :9090
+#   engine      — gRPC :50052 | metrics :8081
+#   resolution  — gRPC :50053 | metrics :9092
+#   gateway     — HTTP :8090  | metrics :9093   ← your public entry point
+#   prometheus  — :9191
+#
+# To run a specific service and its dependencies only:
+#   docker compose up gateway
+#
+# To rebuild after code changes:
+#   docker compose up --build
+
+name: reconx
+
+# ── Shared build context ──────────────────────────────────────────────────────
+# Docker Compose sends the repo root as build context so each Dockerfile can
+# COPY proto/gen/go which lives outside the service directory.
+x-build-context: &build-context
+  context: .
+
+# ── Shared health-check defaults ──────────────────────────────────────────────
+x-healthcheck: &healthcheck
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 20s
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     reconx
+      POSTGRES_PASSWORD: reconx
+      POSTGRES_DB:       reconx
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "pg_isready -U reconx -d reconx"]
+
+  # ── Ingestion Service (Go) ──────────────────────────────────────────────────
+  ingestion:
+    build:
+      <<: *build-context
+      dockerfile: services/ingestion/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RECONX_DATABASE_DSN: "postgres://reconx:reconx@postgres:5432/reconx?sslmode=disable"
+      RECONX_GRPC_PORT:    "50051"
+      RECONX_HTTP_PORT:    "8080"
+      RECONX_METRICS_PORT: "9090"
+      RECONX_LOG_LEVEL:    "info"
+      RECONX_KAFKA_ENABLED: "false"
+    ports:
+      - "50051:50051"   # gRPC
+      - "8080:8080"     # HTTP webhooks
+      - "9090:9090"     # Prometheus metrics
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+
+  # ── Reconciliation Engine (Rust) ────────────────────────────────────────────
+  engine:
+    build:
+      <<: *build-context
+      dockerfile: services/engine/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Layered over config/default.toml via RECONX_ENGINE__ prefix
+      RECONX_ENGINE__DATABASE__URL: "postgres://reconx:reconx@postgres:5432/reconx?sslmode=disable"
+      RECONX_ENGINE__GRPC__PORT:    "50052"
+      RECONX_ENGINE__METRICS__PORT: "9091"
+      RECONX_ENGINE__LOG__LEVEL:    "info"
+    ports:
+      - "50052:50052"   # gRPC
+      - "9091:9091"     # Prometheus metrics + /health
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9091/health || exit 1"]
+
+  # ── Resolution Service (Go) ─────────────────────────────────────────────────
+  resolution:
+    build:
+      <<: *build-context
+      dockerfile: services/resolution/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      engine:
+        condition: service_healthy
+    environment:
+      RECONX_RESOLUTION_DATABASE_DSN:   "postgres://reconx:reconx@postgres:5432/reconx?sslmode=disable"
+      RECONX_RESOLUTION_GRPC_PORT:      "50053"
+      RECONX_RESOLUTION_METRICS_PORT:   "9092"
+      RECONX_RESOLUTION_ENGINE_ADDRESS: "engine:50052"
+      RECONX_RESOLUTION_LOG_LEVEL:      "info"
+    ports:
+      - "50053:50053"   # gRPC
+      - "9092:9092"     # Prometheus metrics + /health
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9092/health || exit 1"]
+
+  # ── API Gateway (Go) ────────────────────────────────────────────────────────
+  gateway:
+    build:
+      <<: *build-context
+      dockerfile: services/gateway/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      ingestion:
+        condition: service_healthy
+      engine:
+        condition: service_healthy
+      resolution:
+        condition: service_healthy
+    environment:
+      RECONX_GATEWAY_HTTP_PORT:            "8090"
+      RECONX_GATEWAY_METRICS_PORT:         "9093"
+      RECONX_GATEWAY_INGESTION_ADDRESS:    "ingestion:50051"
+      RECONX_GATEWAY_ENGINE_ADDRESS:       "engine:50052"
+      RECONX_GATEWAY_RESOLUTION_ADDRESS:   "resolution:50053"
+      RECONX_GATEWAY_LOG_LEVEL:            "info"
+    ports:
+      - "8090:8090"     # Public REST API  ← use this from your browser / client
+      - "9093:9093"     # Prometheus metrics
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8090/health || exit 1"]
+
+  # ── Prometheus ──────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    restart: unless-stopped
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    ports:
+      - "9191:9090"     # Prometheus UI (mapped to 9191 to avoid collisions)
+    depends_on:
+      - ingestion
+      - engine
+      - resolution
+      - gateway
+
+volumes:
+  postgres_data:
+  prometheus_data:

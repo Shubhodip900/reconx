@@ -1,0 +1,66 @@
+[package]
+name = "reconx-engine"
+version = "0.1.0"
+edition = "2021"
+description = "ReconX Reconciliation Engine — core matching, state management, and discrepancy detection"
+authors = ["ReconX Team"]
+
+[[bin]]
+name = "reconx-engine"
+path = "src/main.rs"
+
+[dependencies]
+# ── Async runtime ─────────────────────────────────────────────────────────────
+tokio = { version = "1", features = ["full"] }
+
+# ── gRPC / Protobuf ───────────────────────────────────────────────────────────
+tonic = { version = "0.12", features = ["transport", "channel"] }
+tonic-reflection = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+# ── Database ──────────────────────────────────────────────────────────────────
+# runtime-tokio-rustls: async postgres over TLS using tokio
+# json: JSONB column support (serde_json::Value)
+# chrono: TIMESTAMPTZ ↔ chrono::DateTime<Utc>
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "chrono",
+    "json",
+] }
+
+# ── Decimal arithmetic (financial amounts – never f64) ────────────────────────
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+
+# ── Serialization ─────────────────────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+# Reads config/default.toml + env vars prefixed RECONX_ENGINE__
+config = { version = "0.14", features = ["toml"] }
+
+# ── Structured logging / tracing ──────────────────────────────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# ── Prometheus metrics ────────────────────────────────────────────────────────
+prometheus = { version = "0.13", features = ["process"] }
+
+# ── HTTP server (metrics + health endpoint) ────────────────────────────────────
+axum = "0.7"
+
+# ── Error handling ────────────────────────────────────────────────────────────
+thiserror = "1"
+anyhow = "1"
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+chrono = { version = "0.4", features = ["serde"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+# Bundles a pre-compiled protoc for the current platform so cargo build works
+# out of the box on Windows, macOS, and Linux without any system-wide install.
+protoc-bin-vendored = "3"
