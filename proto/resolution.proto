@@ -6,28 +6,127 @@ import "engine.proto";
 
 option go_package = "github.com/reconx/proto/resolution";
 
+// ResolutionService provides both gRPC RPCs (for service-to-service) and
+// backs an HTTP REST API (for human operators and dashboards).
+//
+// gRPC RPCs (implemented via generated stubs):
+//   ResolveManually  — human picks the 'Golden Record' when systems conflict
+//   ListMismatches   — streaming view of MISMATCHED transactions
+//
+// Extended HTTP REST API (implemented in internal/api, no proto regeneration needed):
+//   POST /v1/resolve/auto/{transaction_ref}     — apply an auto-resolve strategy
+//   POST /v1/resolve/retry/{transaction_ref}    — enqueue a manual retry
+//   GET  /v1/resolve/audit/{transaction_ref}    — fetch full audit trail
+//   GET  /v1/resolve/retry-queue               — inspect the active retry queue
+//   GET  /v1/resolve/mismatches                — paginated list (HTTP alternative to gRPC stream)
 service ResolutionService {
     // Manual override: Human picks the 'Golden Record' when systems conflict
     rpc ResolveManually(ResolutionRequest) returns (ResolutionResponse);
-    
+
     // Retrieval for UI/Dashboard monitoring to show what needs fixing
     rpc ListMismatches(FilterRequest) returns (stream reconx.engine.StateResponse);
 }
 
+// ── Resolution messages ───────────────────────────────────────────────────────
+
 message ResolutionRequest {
-    string transaction_ref = 1;
-    string chosen_source = 2; // The system name that is deemed correct
-    string resolution_reason = 3;
-    string resolver_id = 4;   // User ID or Service ID who performed the resolution
+    string transaction_ref    = 1;
+    string chosen_source      = 2; // The system name that is deemed correct
+    string resolution_reason  = 3;
+    string resolver_id        = 4; // User ID or Service ID who performed the resolution
 }
 
 message ResolutionResponse {
-    bool success = 1;
+    bool                      success    = 1;
     reconx.common.ReconStatus new_status = 2;
+    string                    message    = 3; // Human-readable outcome description
 }
 
 message FilterRequest {
-    int32 page_size = 1;
-    string page_token = 2;
+    int32  page_size    = 1;
+    string page_token   = 2;
     string source_filter = 3; // Filter by a specific source system
+}
+
+// ── Auto-resolve messages (served via HTTP REST — see internal/api) ───────────
+
+// AutoResolveStrategy defines the algorithm used to automatically pick the
+// winning record when a transaction is MISMATCHED.
+enum AutoResolveStrategy {
+    STRATEGY_UNSPECIFIED   = 0;
+    // Pick the highest-priority source from a configured ordered list.
+    // Requires strategy_config["source_priority"] = "source1,source2,..."
+    SOURCE_PRIORITY        = 1;
+    // Pick the source that submitted its record most recently.
+    LATEST_RECORD          = 2;
+    // Pick the source reporting the highest monetary amount.
+    HIGHEST_AMOUNT         = 3;
+    // Pick the source reporting the lowest monetary amount.
+    LOWEST_AMOUNT          = 4;
+    // Pick the source that submitted first (earliest server_received_at).
+    FIRST_SUBMITTED        = 5;
+}
+
+message AutoResolveRequest {
+    string              transaction_ref  = 1;
+    AutoResolveStrategy strategy         = 2;
+    // Strategy-specific config, e.g. {"source_priority": "payment_gw,erp,vendor"}
+    map<string, string> strategy_config  = 3;
+    string              resolver_id      = 4; // Service or user triggering auto-resolve
+}
+
+message AutoResolveResponse {
+    bool                      success       = 1;
+    string                    chosen_source = 2;
+    reconx.common.ReconStatus new_status    = 3;
+    string                    reason        = 4;
+}
+
+// ── Retry messages (served via HTTP REST) ─────────────────────────────────────
+
+message RetryRequest {
+    string transaction_ref = 1;
+    string requested_by    = 2; // Who triggered the retry
+}
+
+message RetryResponse {
+    bool   enqueued       = 1;
+    int32  attempt_number = 2; // Which attempt this will be
+    string next_retry_at  = 3; // RFC3339 timestamp of next scheduled attempt
+}
+
+message RetryQueueEntry {
+    string transaction_ref   = 1;
+    int32  attempt_count     = 2;
+    int32  max_attempts      = 3;
+    string last_attempted_at = 4; // RFC3339 or empty
+    string next_retry_at     = 5; // RFC3339
+    string status            = 6; // PENDING | EXHAUSTED | RESOLVED
+}
+
+message RetryQueueResponse {
+    repeated RetryQueueEntry entries        = 1;
+    string                   next_page_token = 2;
+    int32                    total_pending   = 3;
+    int32                    total_exhausted = 4;
+}
+
+// ── Audit trail messages (served via HTTP REST) ───────────────────────────────
+
+message AuditRequest {
+    string transaction_ref = 1;
+}
+
+message AuditEntry {
+    int64  id              = 1;
+    string transaction_ref = 2;
+    string event_type      = 3; // MATCH_ATTEMPT | MANUAL_RESOLUTION | AUTO_RESOLUTION | RETRY | ...
+    string old_status      = 4;
+    string new_status      = 5;
+    string details_json    = 6; // Free-form JSON blob
+    string created_at      = 7; // RFC3339
+}
+
+message AuditTrailResponse {
+    repeated AuditEntry entries = 1;
 }
