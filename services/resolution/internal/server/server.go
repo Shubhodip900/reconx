@@ -95,9 +95,11 @@ func (s *ResolutionServer) ResolveManually(
 	// ── Write resolution record ────────────────────────────────────────────────
 	if err := db.InsertResolutionRecord(ctx, s.db,
 		req.TransactionRef,
+		"MANUAL",
 		req.ChosenSource,
 		req.ResolutionReason,
 		req.ResolverId,
+		"", // no auto-resolve strategy for manual resolutions
 	); err != nil {
 		s.log.Error("InsertResolutionRecord failed", zap.Error(err))
 		metrics.ResolutionErrorsTotal.WithLabelValues("db_error").Inc()
@@ -110,6 +112,11 @@ func (s *ResolutionServer) ResolveManually(
 		metrics.ResolutionErrorsTotal.WithLabelValues("db_error").Inc()
 		return nil, status.Error(codes.Internal, "failed to update recon state")
 	}
+
+	// ── Stop any pending retry attempts ────────────────────────────────────────
+	// If the transaction was in the retry queue (PENDING or EXHAUSTED), mark it
+	// RESOLVED so the worker does not attempt further re-matching. Fire-and-forget.
+	_ = db.MarkRetryResolved(ctx, s.db, req.TransactionRef)
 
 	// ── Audit log ───────────────────────────────────────────────────────────────
 	_ = db.InsertAuditLog(ctx, s.db,

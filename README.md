@@ -27,11 +27,13 @@ ReconX automates this process end-to-end.
                           |
        ------------------------------------------------
        |                  |                           |
-+----------------+  +------------------+  +----------------+
-| Ingestion Svc  |  | Reconciliation   |  | Resolution Svc |
-| (Go)  :50051   |  | Engine (Rust)    |  | (Go)           |
-|       :8080    |  |       :50052     |  |                |
-+----------------+  +------------------+  +----------------+
++----------------+  +------------------+  +---------------------+
+| Ingestion Svc  |  | Reconciliation   |  | Resolution Svc      |
+| (Go)  :50051   |  | Engine (Rust)    |  | (Go)                |
+|       :8080    |  |       :50052     |  | gRPC  :50053        |
++----------------+  +------------------+  | HTTP  :8082         |
+                                          | Prom  :9092         |
+                                          +---------------------+
        |                  |                           |
        ------------------------------------------------
                           |
@@ -123,6 +125,20 @@ reconx/
 │       ├── Makefile
 │       └── Dockerfile
 │
+│   └── resolution/                     # Resolution Service (Go) ✅
+│       ├── cmd/
+│       │   └── main.go                 # Entrypoint — wires all components
+│       ├── internal/
+│       │   ├── api/                    # HTTP REST handlers (auto-resolve, retry, audit, queue)
+│       │   ├── config/                 # Viper + env var configuration
+│       │   ├── db/                     # All PostgreSQL queries + schema migrations
+│       │   ├── engine/                 # gRPC client for Reconciliation Engine
+│       │   ├── metrics/                # Prometheus metrics
+│       │   ├── resolver/               # Conflict resolution strategies (5 implementations)
+│       │   ├── retry/                  # Background retry worker with exponential backoff
+│       │   └── server/                 # gRPC server (ResolveManually, ListMismatches)
+│       └── go.mod
+│
 └── docs/
     ├── ingestion-service.md            # Ingestion Service full documentation
     └── reconciliation-engine.md       # Reconciliation Engine full documentation
@@ -186,9 +202,33 @@ See **[docs/reconciliation-engine.md](docs/reconciliation-engine.md)** for full 
 
 ---
 
-### Resolution Service (Go) — `services/resolution/` 🚧
+### Resolution Service (Go) — `services/resolution/` ✅
 
-Applies resolution strategies: auto-resolve by business rules, manual review queue, or retry. Exposes the `ListMismatches` streaming API for dashboards.
+Resolves MISMATCHED transactions through three paths: **manual** (operator picks source via gRPC), **automatic** (deterministic strategy via HTTP REST API), and **retry** (background worker re-triggers the engine's matcher with exponential backoff).
+
+**Resolution strategies:**
+
+| Strategy | Description |
+|---|---|
+| `source_priority` | First source from a configured priority list that has a record wins |
+| `latest_record` | Source with the most recent submission time wins |
+| `highest_amount` | Source reporting the highest monetary amount wins |
+| `lowest_amount` | Source reporting the lowest monetary amount wins |
+| `first_submitted` | Source that submitted earliest wins |
+
+**Key features:**
+- gRPC `ResolveManually` — human operator picks winning source; idempotent via `ON CONFLICT DO UPDATE`
+- gRPC `ListMismatches` — server-side streaming with cursor pagination and source filtering
+- HTTP `POST /v1/resolve/auto/{ref}` — auto-resolve with any strategy, per-request strategy override
+- HTTP `POST /v1/resolve/retry/{ref}` — enqueue for retry worker; resets EXHAUSTED entries
+- HTTP `GET /v1/resolve/audit/{ref}` — full chronological audit trail
+- HTTP `GET /v1/resolve/retry-queue` — paginated retry queue view with status filter
+- HTTP `GET /v1/resolve/mismatches` — HTTP alternative to the gRPC stream
+- Background retry worker: exponential backoff (`min(base×2^attempt, max)`), configurable auto-resolve on exhaustion
+- Full Prometheus metrics on all gRPC, HTTP, auto-resolve, and retry worker operations
+- Graceful shutdown: drains gRPC, stops retry worker, shuts down HTTP servers
+
+See **[docs/resolution-service.md](docs/resolution-service.md)** for full documentation.
 
 ---
 
@@ -294,7 +334,34 @@ grpcurl -plaintext \
   localhost:50052 reconx.engine.ReconciliationEngine/ReTriggerMatch
 ```
 
-### 7. Check metrics
+### 6. Start the Resolution Service
+
+```bash
+cd services/resolution
+go build -o bin/reconx-resolution ./cmd/...
+./bin/reconx-resolution
+```
+
+Starts three listeners:
+- `:50053` — gRPC API (`ResolveManually`, `ListMismatches`)
+- `:8082` — HTTP REST API (auto-resolve, retry, audit, queue)
+- `:9092` — Prometheus metrics + health
+
+### 7. Resolve a MISMATCHED transaction
+
+```bash
+# Auto-resolve using source priority
+curl -X POST http://localhost:8082/v1/resolve/auto/INV-2024-001 \
+  -H "Content-Type: application/json" \
+  -d '{"strategy": "source_priority", "source_priority": "payment_gateway,erp_system"}'
+
+# Or manually via gRPC
+grpcurl -plaintext \
+  -d '{"transaction_ref":"INV-2024-001","chosen_source":"vendor_portal","resolver_id":"alice"}' \
+  localhost:50053 reconx.resolution.ResolutionService/ResolveManually
+```
+
+### 8. Check metrics
 
 ```bash
 # Ingestion Service
@@ -302,6 +369,9 @@ curl http://localhost:9090/metrics | grep reconx_ingestion_
 
 # Reconciliation Engine
 curl http://localhost:9091/metrics | grep reconx_engine_
+
+# Resolution Service
+curl http://localhost:9092/metrics | grep reconx_resolution_
 ```
 
 ---
@@ -335,6 +405,21 @@ RECONX_ENGINE__LOG__LEVEL=info
 ```
 
 See [docs/reconciliation-engine.md](docs/reconciliation-engine.md) for the full list.
+
+### Resolution Service (prefix `RECONX_RESOLUTION_`)
+
+```env
+RECONX_RESOLUTION_GRPC_PORT=50053
+RECONX_RESOLUTION_HTTP_PORT=8082
+RECONX_RESOLUTION_DATABASE_DSN=postgres://reconx:reconx@localhost:5432/reconx?sslmode=disable
+RECONX_RESOLUTION_ENGINE_ADDRESS=localhost:50052
+RECONX_RESOLUTION_RETRY_ENABLED=true
+RECONX_RESOLUTION_RETRY_MAX_ATTEMPTS=5
+RECONX_RESOLUTION_AUTO_RESOLVE_DEFAULT_STRATEGY=latest_record
+RECONX_RESOLUTION_AUTO_RESOLVE_AUTO_APPLY_ON_EXHAUSTION=false
+```
+
+See [docs/resolution-service.md](docs/resolution-service.md) for the full list.
 
 ---
 
@@ -383,7 +468,7 @@ make docker        # build Docker image (from repo root)
 | Proto contracts | ✅ Complete |
 | Ingestion Service (Go) | ✅ Complete |
 | Reconciliation Engine (Rust) | ✅ Complete |
-| Resolution Service (Go) | 🚧 In Progress |
+| Resolution Service (Go) | ✅ Complete |
 | API Gateway (Go) | 🚧 Planned |
 | Observability stack (Grafana/ELK) | 🚧 Planned |
 | Docker Compose (full stack) | 🚧 Planned |
@@ -394,3 +479,4 @@ make docker        # build Docker image (from repo root)
 
 - [Ingestion Service](docs/ingestion-service.md) — Architecture, adapters, pipeline, API reference, configuration
 - [Reconciliation Engine](docs/reconciliation-engine.md) — Matching logic, database schema, gRPC API, worker internals, configuration
+- [Resolution Service](docs/resolution-service.md) — Resolution strategies, retry worker, gRPC + HTTP REST API reference, configuration
