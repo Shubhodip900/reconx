@@ -345,7 +345,7 @@ func (w *Worker) writeAuditLog(
 	detailJSON, _ := json.Marshal(detail)
 	_, err := w.database.ExecContext(ctx, `
 		INSERT INTO recon_audit_log
-			(transaction_ref, event_type, old_status, new_status, detail, created_at)
+			(transaction_ref, event_type, old_status, new_status, details, created_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())`,
 		txRef, eventType, oldStatus, newStatus, detailJSON,
 	)
