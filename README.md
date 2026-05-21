@@ -19,10 +19,11 @@ ReconX automates this process end-to-end.
                |   CLI / Dashboard    |
                +----------+-----------+
                           |
-                       gRPC API
+                        HTTP / gRPC
                           |
                +----------------------+
                |   API Gateway (Go)   |
+               |        :8090         |
                +----------+-----------+
                           |
        ------------------------------------------------
@@ -45,11 +46,7 @@ ReconX automates this process end-to-end.
                  | recon_audit_log   |
                  +-------------------+
 
-       +-------------------+
-       | Kafka (optional)  |
-       +-------------------+
-
-Observability: Prometheus + Grafana + ELK + Alertmanager
+Observability: Prometheus + Grafana
 ```
 
 ---
@@ -61,9 +58,9 @@ Observability: Prometheus + Grafana + ELK + Alertmanager
 | Ingestion Service | Go | Lightweight goroutines, fast gRPC support |
 | Reconciliation Engine | Rust | Memory safety, exact decimal arithmetic, zero-cost concurrency |
 | Resolution Service | Go | Network services, concurrency |
+| API Gateway | Go | Single entry point, request routing, auth boundary |
 | Storage | PostgreSQL | Strong consistency, complex queries, transactions |
 | Transport | gRPC | High performance, strong typing via proto contracts |
-| Messaging | Kafka (optional) | Event-driven decoupling, scalability |
 | Metrics | Prometheus + Grafana | Industry-standard observability |
 | Logging | Zap (Go) / tracing (Rust) | High-performance structured logging |
 
@@ -90,7 +87,7 @@ reconx/
 │   │   ├── cmd/
 │   │   │   └── main.go                 # Entrypoint
 │   │   ├── internal/
-│   │   │   ├── adapters/               # Source connectors (gRPC/webhook/file/kafka/rest/db)
+│   │   │   ├── adapters/               # Source connectors (gRPC/webhook/file/rest/db)
 │   │   │   ├── pipeline/               # Enrich → Validate → Normalize stage chain
 │   │   │   ├── server/                 # gRPC IngestionService implementation
 │   │   │   ├── idempotency/            # Idempotent receiver (PostgreSQL-backed)
@@ -160,7 +157,6 @@ The data entry layer. Accepts records from multiple sources, validates and norma
 | gRPC `BulkStreamIngest` | `:50051` | High-throughput batch loads |
 | HTTP Webhook | `POST :8080/ingest/{source}` | SaaS platforms, vendor callbacks |
 | File Upload | `POST :8080/ingest/file` | ERP exports, bank statements, CSV dumps |
-| Kafka Consumer | configurable topic | Event-driven upstream systems |
 | REST Poller | configurable URL + interval | Legacy systems with polling APIs |
 | DB Poller | configurable SQL + watermark | Systems accessible only via SQL |
 
@@ -234,7 +230,27 @@ See **[docs/resolution-service.md](docs/resolution-service.md)** for full docume
 
 ## Quick Start
 
-### Prerequisites
+### Option A — Full stack via Docker Compose (recommended)
+
+```bash
+make up
+```
+
+This builds all Docker images and starts PostgreSQL, all four services, and Prometheus in one command. The public REST API is available at `http://localhost:8090`.
+
+### Option B — Local binaries + Docker postgres
+
+```bash
+make run-all
+```
+
+Starts PostgreSQL via Docker Compose then builds and runs all four service binaries locally. Logs for each service are written to `/tmp/reconx-*.log`. Press Ctrl+C to stop everything.
+
+---
+
+### Manual step-by-step
+
+#### Prerequisites
 
 - Go 1.23+
 - Rust 1.82+ (`rustup update`)
@@ -384,7 +400,6 @@ curl http://localhost:9092/metrics | grep reconx_resolution_
 RECONX_GRPC_PORT=50051
 RECONX_HTTP_PORT=8080
 RECONX_DATABASE_DSN=postgres://reconx:reconx@localhost:5432/reconx?sslmode=disable
-RECONX_KAFKA_ENABLED=false
 RECONX_RATELIMIT_DEFAULT_RPS=1000
 RECONX_LOG_LEVEL=info
 ```
@@ -469,9 +484,9 @@ make docker        # build Docker image (from repo root)
 | Ingestion Service (Go) | ✅ Complete |
 | Reconciliation Engine (Rust) | ✅ Complete |
 | Resolution Service (Go) | ✅ Complete |
-| API Gateway (Go) | 🚧 Planned |
+| API Gateway (Go) | ✅ Complete |
+| Docker Compose (full stack) | ✅ Complete |
 | Observability stack (Grafana/ELK) | 🚧 Planned |
-| Docker Compose (full stack) | 🚧 Planned |
 
 ---
 

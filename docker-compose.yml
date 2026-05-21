@@ -7,7 +7,7 @@
 #   postgres    — 5432
 #   ingestion   — gRPC :50051 | HTTP :8080 | metrics :9090
 #   engine      — gRPC :50052 | metrics :8081
-#   resolution  — gRPC :50053 | metrics :9092
+#   resolution  — gRPC :50053 | HTTP :8082 | metrics :9092
 #   gateway     — HTTP :8090  | metrics :9093   ← your public entry point
 #   prometheus  — :9191
 #
@@ -85,7 +85,7 @@ services:
         condition: service_healthy
     environment:
       # Layered over config/default.toml via RECONX_ENGINE__ prefix
-      RECONX_ENGINE__DATABASE__URL: "postgres://reconx:reconx@postgres:5432/reconx?sslmode=disable"
+      RECONX_ENGINE__DATABASE__DSN: "postgres://reconx:reconx@postgres:5432/reconx?sslmode=disable"
       RECONX_ENGINE__GRPC__PORT:    "50052"
       RECONX_ENGINE__METRICS__PORT: "9091"
       RECONX_ENGINE__LOG__LEVEL:    "info"
@@ -115,6 +115,7 @@ services:
       RECONX_RESOLUTION_LOG_LEVEL:      "info"
     ports:
       - "50053:50053"   # gRPC
+      - "8082:8082"     # HTTP REST API
       - "9092:9092"     # Prometheus metrics + /health
     healthcheck:
       <<: *healthcheck

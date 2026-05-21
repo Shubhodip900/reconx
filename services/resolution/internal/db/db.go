@@ -5,7 +5,7 @@
 //   - resolution_retry_queue  — tracks automatic retry state per transaction
 //
 // Tables it reads (owned by other services):
-//   - recon_state             — reads status, last_updated (owned by engine)
+//   - recon_state             — reads status, updated_at (owned by engine)
 //   - recon_match_details     — reads system_name, discrepancy_found (owned by engine)
 //   - recon_audit_log         — appends audit entries (shared write convention)
 //   - ingestion_records       — reads source timing for resolver strategies
@@ -136,7 +136,7 @@ type AuditLogRow struct {
 // Returns sql.ErrNoRows if not found.
 func GetReconState(ctx context.Context, db *sql.DB, txRef string) (*ReconState, error) {
 	row := db.QueryRowContext(ctx,
-		`SELECT transaction_ref, status, last_updated
+		`SELECT transaction_ref, status, updated_at
 		   FROM recon_state
 		  WHERE transaction_ref = $1`,
 		txRef,
@@ -152,7 +152,7 @@ func GetReconState(ctx context.Context, db *sql.DB, txRef string) (*ReconState, 
 func UpdateReconStateToResolved(ctx context.Context, db *sql.DB, txRef string) error {
 	_, err := db.ExecContext(ctx, `
 		UPDATE recon_state
-		   SET status = 'RESOLVED', last_updated = NOW()
+		   SET status = 'RESOLVED', updated_at = NOW()
 		 WHERE transaction_ref = $1`,
 		txRef,
 	)
@@ -203,7 +203,7 @@ func InsertAuditLog(
 	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO recon_audit_log
-			(transaction_ref, event_type, old_status, new_status, detail, created_at)
+			(transaction_ref, event_type, old_status, new_status, details, created_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())`,
 		txRef, eventType, oldStatus, newStatus, detailJSON,
 	)
@@ -220,7 +220,7 @@ func InsertAuditLogJSON(
 ) error {
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO recon_audit_log
-			(transaction_ref, event_type, old_status, new_status, detail, created_at)
+			(transaction_ref, event_type, old_status, new_status, details, created_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())`,
 		txRef, eventType, oldStatus, newStatus, detailJSON,
 	)
@@ -230,7 +230,7 @@ func InsertAuditLogJSON(
 // GetAuditTrail retrieves the full audit log for a transaction in chronological order.
 func GetAuditTrail(ctx context.Context, db *sql.DB, txRef string) ([]AuditLogRow, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, transaction_ref, event_type, old_status, new_status, detail, created_at
+		SELECT id, transaction_ref, event_type, old_status, new_status, details, created_at
 		  FROM recon_audit_log
 		 WHERE transaction_ref = $1
 		 ORDER BY created_at ASC`,
@@ -284,7 +284,7 @@ func ListMismatched(
 	switch {
 	case pageToken == "" && sourceFilter == "":
 		rows, err = db.QueryContext(ctx, `
-			SELECT transaction_ref, last_updated
+			SELECT transaction_ref, updated_at
 			  FROM recon_state
 			 WHERE status = 'MISMATCHED'
 			 ORDER BY transaction_ref ASC
@@ -293,7 +293,7 @@ func ListMismatched(
 		)
 	case pageToken != "" && sourceFilter == "":
 		rows, err = db.QueryContext(ctx, `
-			SELECT transaction_ref, last_updated
+			SELECT transaction_ref, updated_at
 			  FROM recon_state
 			 WHERE status = 'MISMATCHED'
 			   AND transaction_ref > $2
@@ -303,7 +303,7 @@ func ListMismatched(
 		)
 	case pageToken == "" && sourceFilter != "":
 		rows, err = db.QueryContext(ctx, `
-			SELECT DISTINCT rs.transaction_ref, rs.last_updated
+			SELECT DISTINCT rs.transaction_ref, rs.updated_at
 			  FROM recon_state rs
 			  JOIN recon_match_details rmd
 			    ON rmd.transaction_ref = rs.transaction_ref
@@ -315,7 +315,7 @@ func ListMismatched(
 		)
 	default:
 		rows, err = db.QueryContext(ctx, `
-			SELECT DISTINCT rs.transaction_ref, rs.last_updated
+			SELECT DISTINCT rs.transaction_ref, rs.updated_at
 			  FROM recon_state rs
 			  JOIN recon_match_details rmd
 			    ON rmd.transaction_ref = rs.transaction_ref

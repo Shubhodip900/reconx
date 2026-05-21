@@ -2,6 +2,7 @@
 #
 # FULL STACK (single command, recommended):
 #   make up          — build images + start entire stack via Docker Compose
+#   make run-all     — build binaries + start all services locally (postgres via Docker)
 #   make down        — stop and remove containers
 #   make logs        — tail logs from all services
 #
@@ -24,7 +25,7 @@
 
 .PHONY: up down logs ps \
         build-all build-ingestion build-engine build-resolution build-gateway \
-        run-ingestion run-engine run-resolution run-gateway \
+        run-all run-ingestion run-engine run-resolution run-gateway \
         test-all test-ingestion test-engine test-resolution test-gateway \
         lint-all proto help
 
@@ -73,6 +74,10 @@ build-gateway:
 
 # ── Run services locally (each in its own terminal) ──────────────────────────
 # Prerequisite: PostgreSQL must be running locally (or via `docker compose up postgres`).
+
+## run-all: Build all services and start them locally (postgres via Docker)
+run-all:
+	bash scripts/run-local.sh
 
 ## run-ingestion: Run only the Ingestion Service locally
 run-ingestion:
