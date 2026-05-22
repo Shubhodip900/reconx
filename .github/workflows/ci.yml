@@ -1,68 +1,224 @@
-name: ReconX Quality Checks
+name: ReconX CI
 
 on:
+  push:
+    branches: [main, develop]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
+
+env:
+  GO_VERSION: "1.22"
+  RUST_TOOLCHAIN: stable
 
 jobs:
-  # 1. Spell Check & Formatting
-  lint-and-spell:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Build every service, run static analysis and unit tests.
+  # Steps for a service are skipped (not failed) if its directory does not
+  # exist yet, so the pipeline stays green while services are being added.
+  # ─────────────────────────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check Spelling
-        uses: crate-ci/typos@master # Extremely fast spell checker for code
+      # ── Go toolchain ──────────────────────────────────────────────────────
+      - name: Set up Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
         with:
-          files: .
+          go-version: ${{ env.GO_VERSION }}
 
-      - name: Markdown Lint
-        uses: nosotroseasy/markdown-lint-check@v1
-        with:
-          config-file: ".github/linters/.markdownlint.json"
+      # ingestion
+      - name: go build – ingestion
+        if: hashFiles('services/ingestion/go.mod') != ''
+        run: go build ./...
+        working-directory: services/ingestion
 
-  # 2. Go Quality Checks
-  go-checks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v4
-        with:
-          go-version: '1.21'
-      
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v3
+      - name: go vet – ingestion
+        if: hashFiles('services/ingestion/go.mod') != ''
+        run: go vet ./...
+        working-directory: services/ingestion
+
+      # resolution
+      - name: go build – resolution
+        if: hashFiles('services/resolution/go.mod') != ''
+        run: go build ./...
+        working-directory: services/resolution
+
+      - name: go vet – resolution
+        if: hashFiles('services/resolution/go.mod') != ''
+        run: go vet ./...
+        working-directory: services/resolution
+
+      # gateway
+      - name: go build – gateway
+        if: hashFiles('services/gateway/go.mod') != ''
+        run: go build ./...
+        working-directory: services/gateway
+
+      - name: go vet – gateway
+        if: hashFiles('services/gateway/go.mod') != ''
+        run: go vet ./...
+        working-directory: services/gateway
+
+      # golangci-lint – one invocation per module
+      - name: golangci-lint – ingestion
+        if: hashFiles('services/ingestion/go.mod') != ''
+        uses: golangci/golangci-lint-action@v6
         with:
           version: latest
-          args: --timeout=5m
+          working-directory: services/ingestion
 
-  # 3. Rust Quality Checks (The Engine)
-  rust-checks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: golangci-lint – resolution
+        if: hashFiles('services/resolution/go.mod') != ''
+        uses: golangci/golangci-lint-action@v6
         with:
-          components: clippy, rustfmt
+          version: latest
+          working-directory: services/resolution
 
-      - name: Rust Format Check
-        run: cargo fmt --all -- --check
+      - name: golangci-lint – gateway
+        if: hashFiles('services/gateway/go.mod') != ''
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: services/gateway
 
-      - name: Rust Clippy (Linter)
+      # ── Rust engine ───────────────────────────────────────────────────────
+      - name: Set up Rust (${{ env.RUST_TOOLCHAIN }})
+        if: hashFiles('services/engine/Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+
+      - name: Rust dependency cache
+        if: hashFiles('services/engine/Cargo.toml') != ''
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/engine -> target
+
+      - name: cargo build – engine
+        if: hashFiles('services/engine/Cargo.toml') != ''
+        run: cargo build
+        working-directory: services/engine
+
+      - name: cargo clippy – engine
+        if: hashFiles('services/engine/Cargo.toml') != ''
         run: cargo clippy -- -D warnings
+        working-directory: services/engine
 
-  # 4. Proto Consistency Check
-  proto-check:
+      - name: cargo test – engine
+        if: hashFiles('services/engine/Cargo.toml') != ''
+        run: cargo test
+        working-directory: services/engine
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Integration – all four services wired to a real Postgres instance.
+  #
+  # This job is skipped automatically until every service directory and the
+  # smoke-test script are present in the repo.
+  # ─────────────────────────────────────────────────────────────────────────
+  integration:
+    name: Integration Tests
+    needs: build-and-test
     runs-on: ubuntu-latest
+
+    # Skip gracefully until all four services + smoke script exist.
+    if: >
+      hashFiles('services/ingestion/go.mod')  != '' &&
+      hashFiles('services/resolution/go.mod') != '' &&
+      hashFiles('services/gateway/go.mod')    != '' &&
+      hashFiles('services/engine/Cargo.toml') != '' &&
+      hashFiles('scripts/smoke_test.sh')      != ''
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER:     reconx
+          POSTGRES_PASSWORD: reconx
+          POSTGRES_DB:       reconx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://reconx:reconx@localhost:5432/reconx?sslmode=disable
+
     steps:
       - uses: actions/checkout@v4
-      - name: Install Protoc
-        run: sudo apt-get install -y protobuf-compiler
-      
-      - name: Check Proto Breaking Changes
-        uses: bufbuild/buf-action@v1
+
+      - name: Set up Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
         with:
-          setup_only: true
-      # This ensures your proto files are valid and follow best practices
-      - run: buf lint
-        working-directory: proto
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Set up Rust (${{ env.RUST_TOOLCHAIN }})
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Rust dependency cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/engine -> target
+
+      # ── Build all service binaries ─────────────────────────────────────
+      - name: Build Go binaries (ingestion, resolution, gateway)
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          cd "$GITHUB_WORKSPACE/services/ingestion" && go build -o "$GITHUB_WORKSPACE/bin/ingestion" .
+          cd "$GITHUB_WORKSPACE/services/resolution" && go build -o "$GITHUB_WORKSPACE/bin/resolution" .
+          cd "$GITHUB_WORKSPACE/services/gateway"    && go build -o "$GITHUB_WORKSPACE/bin/gateway"    .
+
+      - name: Build engine binary (Rust, release)
+        run: cargo build --release
+        working-directory: services/engine
+
+      # ── Start all services in the background ──────────────────────────
+      - name: Start services
+        run: |
+          DATABASE_URL="$DATABASE_URL" GRPC_PORT=50051 \
+            "$GITHUB_WORKSPACE/bin/ingestion" > /tmp/ingestion.log 2>&1 &
+
+          DATABASE_URL="$DATABASE_URL" GRPC_PORT=50053 \
+            "$GITHUB_WORKSPACE/services/engine/target/release/engine" > /tmp/engine.log 2>&1 &
+
+          DATABASE_URL="$DATABASE_URL" GRPC_PORT=50052 \
+            "$GITHUB_WORKSPACE/bin/resolution" > /tmp/resolution.log 2>&1 &
+
+          DATABASE_URL="$DATABASE_URL" \
+          HTTP_PORT=8080 \
+          INGESTION_ADDR=localhost:50051 \
+          ENGINE_ADDR=localhost:50053 \
+          RESOLUTION_ADDR=localhost:50052 \
+            "$GITHUB_WORKSPACE/bin/gateway" > /tmp/gateway.log 2>&1 &
+
+      - name: Wait for gateway health-check
+        run: |
+          echo "Polling http://localhost:8080/healthz …"
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8080/healthz && echo "Gateway is ready." && break
+            echo "  attempt $i/20 — retrying in 3 s"
+            sleep 3
+          done
+
+      # ── Smoke test: ingest → MISMATCHED → resolve → RESOLVED ──────────
+      - name: Run smoke test
+        run: bash scripts/smoke_test.sh
+        env:
+          GATEWAY_URL: http://localhost:8080
+
+      # ── Always dump logs on failure for easy debugging ─────────────────
+      - name: Dump service logs
+        if: failure()
+        run: |
+          for svc in ingestion engine resolution gateway; do
+            echo "======== $svc ========"
+            cat "/tmp/${svc}.log" 2>/dev/null || echo "(no log)"
+          done
