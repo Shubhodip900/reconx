@@ -3,23 +3,33 @@
 // The gateway is the single public-facing HTTP entry point for the ReconX
 // platform. It translates REST JSON calls into gRPC calls to the three
 // upstream services (Ingestion, Engine, Resolution) and returns JSON responses.
+// Four resolution routes are forwarded to the Resolution Service's HTTP REST API.
 //
 // API surface:
 //
-//	POST   /v1/ingest                           → Ingestion.SubmitRecord
-//	GET    /v1/recon/{transaction_ref}           → Engine.GetReconState
-//	POST   /v1/recon/{transaction_ref}/retrigger → Engine.ReTriggerMatch
-//	POST   /v1/resolution/{transaction_ref}      → Resolution.ResolveManually
-//	GET    /v1/resolution/mismatches             → Resolution.ListMismatches
-//	GET    /health                               → aggregate health
-//	GET    /metrics                              → Prometheus metrics
+//	POST   /v1/ingest                               → Ingestion.SubmitRecord (gRPC)
+//	GET    /v1/recon/{transaction_ref}              → Engine.GetReconState (gRPC)
+//	POST   /v1/recon/{transaction_ref}/retrigger    → Engine.ReTriggerMatch (gRPC)
+//	POST   /v1/resolution/{transaction_ref}         → Resolution.ResolveManually (gRPC)
+//	GET    /v1/resolution/mismatches                → Resolution.ListMismatches (gRPC stream)
+//	POST   /v1/resolution/{ref}/auto               → Resolution HTTP /v1/resolve/auto/{ref}
+//	POST   /v1/resolution/{ref}/retry              → Resolution HTTP /v1/resolve/retry/{ref}
+//	GET    /v1/resolution/{ref}/audit              → Resolution HTTP /v1/resolve/audit/{ref}
+//	GET    /v1/resolution/retry-queue              → Resolution HTTP /v1/resolve/retry-queue
+//	GET    /health                                  → aggregate health (auth-exempt)
+//	GET    /metrics                                 → Prometheus metrics (separate port)
+//
+// Authentication:
+//
+//	All /v1/* routes require the X-API-Key header to match RECONX_GATEWAY_API_KEY.
+//	GET /health is exempt. The metrics server has no auth.
 //
 // Startup sequence:
 //  1. Load configuration
 //  2. Register Prometheus metrics
-//  3. Dial upstream gRPC services
-//  4. Start HTTP API server
-//  5. Start metrics/health server
+//  3. Dial upstream gRPC services + create Resolution HTTP client
+//  4. Start HTTP API server (with auth middleware)
+//  5. Start metrics/health server (separate port)
 //  6. Block until SIGTERM / SIGINT → graceful shutdown
 package main
 
@@ -40,6 +50,7 @@ import (
 	"github.com/reconx/services/gateway/internal/config"
 	"github.com/reconx/services/gateway/internal/handlers"
 	"github.com/reconx/services/gateway/internal/metrics"
+	"github.com/reconx/services/gateway/internal/middleware"
 )
 
 func main() {
@@ -59,46 +70,51 @@ func main() {
 		zap.Int("metrics_port", cfg.Metrics.Port),
 		zap.String("ingestion", cfg.Ingestion.Address),
 		zap.String("engine", cfg.Engine.Address),
-		zap.String("resolution", cfg.Resolution.Address),
+		zap.String("resolution_grpc", cfg.Resolution.Address),
+		zap.String("resolution_http", cfg.Resolution.HTTPAddress),
+		zap.Bool("auth_enabled", cfg.APIKey != ""),
 	)
 
 	// ── Prometheus metrics ────────────────────────────────────────────────────
 	reg := prometheus.NewRegistry()
 	metrics.Register(reg)
 
-	// ── Upstream gRPC clients ─────────────────────────────────────────────────
+	// ── Upstream clients ──────────────────────────────────────────────────────
 	upstreams, err := clients.New(
 		cfg.Ingestion.Address,
 		cfg.Engine.Address,
 		cfg.Resolution.Address,
+		cfg.Resolution.HTTPAddress,
 	)
 	if err != nil {
 		log.Fatal("failed to dial upstream services", zap.Error(err))
 	}
 	defer upstreams.Close()
 
-	log.Info("upstream gRPC clients ready",
-		zap.String("ingestion", cfg.Ingestion.Address),
-		zap.String("engine", cfg.Engine.Address),
-		zap.String("resolution", cfg.Resolution.Address),
+	log.Info("upstream clients ready",
+		zap.String("ingestion_grpc", cfg.Ingestion.Address),
+		zap.String("engine_grpc", cfg.Engine.Address),
+		zap.String("resolution_grpc", cfg.Resolution.Address),
+		zap.String("resolution_http", cfg.Resolution.HTTPAddress),
 	)
 
 	// ── HTTP API Server ───────────────────────────────────────────────────────
+	// Auth middleware wraps the entire API mux; /health is exempt inside the
+	// middleware itself so liveness probes work without a key.
+	apiHandler := middleware.APIKeyAuth(cfg.APIKey)(handlers.New(upstreams, cfg, log))
+
 	apiServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.HTTP.Port),
-		Handler:      handlers.New(upstreams, log),
+		Handler:      apiHandler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// ── Metrics + Health Server ───────────────────────────────────────────────
+	// ── Metrics Server ────────────────────────────────────────────────────────
+	// Served on a separate port — no auth, not publicly exposed.
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle(cfg.Metrics.Path, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	metricsMux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok","service":"reconx-gateway"}`))
-	})
 	metricsServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Metrics.Port),
 		Handler: metricsMux,
