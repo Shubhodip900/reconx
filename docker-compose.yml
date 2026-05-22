@@ -135,12 +135,19 @@ services:
       resolution:
         condition: service_healthy
     environment:
-      RECONX_GATEWAY_HTTP_PORT:            "8090"
-      RECONX_GATEWAY_METRICS_PORT:         "9093"
-      RECONX_GATEWAY_INGESTION_ADDRESS:    "ingestion:50051"
-      RECONX_GATEWAY_ENGINE_ADDRESS:       "engine:50052"
-      RECONX_GATEWAY_RESOLUTION_ADDRESS:   "resolution:50053"
-      RECONX_GATEWAY_LOG_LEVEL:            "info"
+      RECONX_GATEWAY_HTTP_PORT:                  "8090"
+      RECONX_GATEWAY_METRICS_PORT:               "9093"
+      RECONX_GATEWAY_INGESTION_ADDRESS:          "ingestion:50051"
+      RECONX_GATEWAY_ENGINE_ADDRESS:             "engine:50052"
+      RECONX_GATEWAY_RESOLUTION_ADDRESS:         "resolution:50053"
+      RECONX_GATEWAY_RESOLUTION_HTTP_ADDRESS:    "http://resolution:8082"
+      RECONX_GATEWAY_INGESTION_HEALTH_URL:       "http://ingestion:8080/health"
+      RECONX_GATEWAY_ENGINE_HEALTH_URL:          "http://engine:9091/health"
+      RECONX_GATEWAY_RESOLUTION_HEALTH_URL:      "http://resolution:8082/health"
+      # Set RECONX_GATEWAY_API_KEY to a non-empty secret to enable auth.
+      # Example: RECONX_GATEWAY_API_KEY: "change-me-in-production"
+      RECONX_GATEWAY_API_KEY:                    ""
+      RECONX_GATEWAY_LOG_LEVEL:                  "info"
     ports:
       - "8090:8090"     # Public REST API  ← use this from your browser / client
       - "9093:9093"     # Prometheus metrics

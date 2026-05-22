@@ -1,21 +1,27 @@
 // Package handlers implements the HTTP request handlers for the ReconX API Gateway.
 //
-// REST API surface:
+// REST API surface (all /v1/* routes require X-API-Key header):
 //
-//	POST   /v1/ingest                          → Ingestion.SubmitRecord
-//	GET    /v1/recon/{transaction_ref}          → Engine.GetReconState
-//	POST   /v1/recon/{transaction_ref}/retrigger→ Engine.ReTriggerMatch
-//	POST   /v1/resolution/{transaction_ref}     → Resolution.ResolveManually
-//	GET    /v1/resolution/mismatches            → Resolution.ListMismatches (stream → JSON array)
-//	GET    /health                              → aggregate health
+//	POST   /v1/ingest                              → Ingestion.SubmitRecord (gRPC)
+//	GET    /v1/recon/{transaction_ref}             → Engine.GetReconState (gRPC)
+//	POST   /v1/recon/{transaction_ref}/retrigger   → Engine.ReTriggerMatch (gRPC)
+//	POST   /v1/resolution/{transaction_ref}        → Resolution.ResolveManually (gRPC)
+//	GET    /v1/resolution/mismatches               → Resolution.ListMismatches (gRPC stream → JSON)
+//	POST   /v1/resolution/{ref}/auto               → Resolution HTTP /v1/resolve/auto/{ref}
+//	POST   /v1/resolution/{ref}/retry              → Resolution HTTP /v1/resolve/retry/{ref}
+//	GET    /v1/resolution/{ref}/audit              → Resolution HTTP /v1/resolve/audit/{ref}
+//	GET    /v1/resolution/retry-queue              → Resolution HTTP /v1/resolve/retry-queue
+//	GET    /health                                 → aggregate health (no auth)
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -23,22 +29,24 @@ import (
 	"google.golang.org/grpc/status"
 
 	commonpb     "github.com/reconx/proto/gen/go/common"
+	enginepb     "github.com/reconx/proto/gen/go/engine"
 	ingestionpb  "github.com/reconx/proto/gen/go/ingestion"
 	resolutionpb "github.com/reconx/proto/gen/go/resolution"
-	enginepb     "github.com/reconx/proto/gen/go/engine"
 	"github.com/reconx/services/gateway/internal/clients"
+	"github.com/reconx/services/gateway/internal/config"
 	"github.com/reconx/services/gateway/internal/metrics"
 )
 
 // Handler bundles the HTTP mux and upstream clients.
 type Handler struct {
 	clients *clients.Clients
+	cfg     *config.Config
 	log     *zap.Logger
 }
 
 // New returns an HTTP mux pre-wired with all gateway routes.
-func New(c *clients.Clients, log *zap.Logger) http.Handler {
-	h := &Handler{clients: c, log: log}
+func New(c *clients.Clients, cfg *config.Config, log *zap.Logger) http.Handler {
+	h := &Handler{clients: c, cfg: cfg, log: log}
 	mux := http.NewServeMux()
 
 	// Ingestion
@@ -48,11 +56,17 @@ func New(c *clients.Clients, log *zap.Logger) http.Handler {
 	mux.HandleFunc("GET /v1/recon/{transaction_ref}", h.getReconState)
 	mux.HandleFunc("POST /v1/recon/{transaction_ref}/retrigger", h.retriggerMatch)
 
-	// Resolution
+	// Resolution — gRPC-backed
 	mux.HandleFunc("POST /v1/resolution/{transaction_ref}", h.resolveManually)
 	mux.HandleFunc("GET /v1/resolution/mismatches", h.listMismatches)
 
-	// Health
+	// Resolution — HTTP proxy routes (forwarded to resolution service REST API)
+	mux.HandleFunc("GET /v1/resolution/retry-queue", h.retryQueueProxy)
+	mux.HandleFunc("POST /v1/resolution/{ref}/auto", h.autoResolveProxy)
+	mux.HandleFunc("POST /v1/resolution/{ref}/retry", h.retryProxy)
+	mux.HandleFunc("GET /v1/resolution/{ref}/audit", h.auditProxy)
+
+	// Health (auth-exempt — handled by middleware before reaching here)
 	mux.HandleFunc("GET /health", h.health)
 
 	return instrument(mux)
@@ -310,13 +324,175 @@ func (h *Handler) listMismatches(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── Resolution HTTP proxy routes ──────────────────────────────────────────────
+//
+// These four routes are not available over gRPC — they forward to the
+// Resolution Service's HTTP REST API (default :8082).
+//
+// Gateway path                     → Upstream path
+// POST /v1/resolution/{ref}/auto   → POST /v1/resolve/auto/{ref}
+// POST /v1/resolution/{ref}/retry  → POST /v1/resolve/retry/{ref}
+// GET  /v1/resolution/{ref}/audit  → GET  /v1/resolve/audit/{ref}
+// GET  /v1/resolution/retry-queue  → GET  /v1/resolve/retry-queue
+
+// autoResolveProxy handles POST /v1/resolution/{ref}/auto.
+func (h *Handler) autoResolveProxy(w http.ResponseWriter, r *http.Request) {
+	ref := r.PathValue("ref")
+	if ref == "" {
+		writeError(w, http.StatusBadRequest, "ref is required")
+		return
+	}
+	h.proxyToResolution(w, r, "/v1/resolve/auto/"+ref)
+}
+
+// retryProxy handles POST /v1/resolution/{ref}/retry.
+func (h *Handler) retryProxy(w http.ResponseWriter, r *http.Request) {
+	ref := r.PathValue("ref")
+	if ref == "" {
+		writeError(w, http.StatusBadRequest, "ref is required")
+		return
+	}
+	h.proxyToResolution(w, r, "/v1/resolve/retry/"+ref)
+}
+
+// auditProxy handles GET /v1/resolution/{ref}/audit.
+func (h *Handler) auditProxy(w http.ResponseWriter, r *http.Request) {
+	ref := r.PathValue("ref")
+	if ref == "" {
+		writeError(w, http.StatusBadRequest, "ref is required")
+		return
+	}
+	h.proxyToResolution(w, r, "/v1/resolve/audit/"+ref)
+}
+
+// retryQueueProxy handles GET /v1/resolution/retry-queue.
+func (h *Handler) retryQueueProxy(w http.ResponseWriter, r *http.Request) {
+	h.proxyToResolution(w, r, "/v1/resolve/retry-queue")
+}
+
+// proxyToResolution forwards the current request to the Resolution Service
+// HTTP REST API, rewriting the path to the upstream equivalent and piping the
+// response (status code + body) back to the caller unchanged.
+func (h *Handler) proxyToResolution(w http.ResponseWriter, r *http.Request, upstreamPath string) {
+	target := h.clients.ResolutionHTTP.BaseURL() + upstreamPath
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
+	if err != nil {
+		h.log.Error("proxyToResolution: build request failed",
+			zap.String("path", upstreamPath), zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "proxy error")
+		return
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		req.Header.Set("Content-Type", ct)
+	}
+
+	resp, err := h.clients.ResolutionHTTP.Do(req)
+	if err != nil {
+		h.log.Warn("proxyToResolution: upstream unreachable",
+			zap.String("path", upstreamPath), zap.Error(err))
+		metrics.UpstreamErrors.WithLabelValues("resolution_http").Inc()
+		writeError(w, http.StatusBadGateway, "resolution service unavailable")
+		return
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
 // ── GET /health ───────────────────────────────────────────────────────────────
 
+// healthHTTP is a shared client for upstream health pings.
+// Short timeout — we don't want the gateway health check to block callers.
+var healthHTTP = &http.Client{Timeout: 5 * time.Second}
+
+// health handles GET /health.
+//
+// Pings each upstream's /health endpoint concurrently and returns an aggregate
+// status. Returns 200 if all upstreams are healthy, 503 otherwise.
+//
+//	{
+//	  "status": "ok",               // "ok" | "degraded"
+//	  "services": {
+//	    "ingestion":  "ok",
+//	    "engine":     "ok",
+//	    "resolution": "ok"
+//	  }
+//	}
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":  "ok",
-		"service": "reconx-gateway",
+	type probe struct {
+		name string
+		url  string
+	}
+	probes := []probe{
+		{"ingestion", h.cfg.Ingestion.HealthURL},
+		{"engine", h.cfg.Engine.HealthURL},
+		{"resolution", h.cfg.Resolution.HealthURL},
+	}
+
+	type result struct {
+		name string
+		ok   bool
+	}
+	results := make([]result, len(probes))
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for i, p := range probes {
+		wg.Add(1)
+		go func(i int, name, url string) {
+			defer wg.Done()
+			results[i] = result{name: name, ok: pingUpstream(ctx, url)}
+		}(i, p.name, p.url)
+	}
+	wg.Wait()
+
+	overall := "ok"
+	services := make(map[string]string, len(results))
+	for _, res := range results {
+		if res.ok {
+			services[res.name] = "ok"
+		} else {
+			services[res.name] = "unhealthy"
+			overall = "degraded"
+		}
+	}
+
+	httpCode := http.StatusOK
+	if overall != "ok" {
+		httpCode = http.StatusServiceUnavailable
+	}
+
+	writeJSON(w, httpCode, map[string]any{
+		"status":   overall,
+		"services": services,
 	})
+}
+
+// pingUpstream performs a GET request to url and returns true if it responds
+// with HTTP 200. Any error or non-200 response is treated as unhealthy.
+func pingUpstream(ctx context.Context, url string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := healthHTTP.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	// Drain the body so the connection can be reused.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode == http.StatusOK
 }
 
 // ── Shared serialisation helpers ──────────────────────────────────────────────
