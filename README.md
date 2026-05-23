@@ -236,7 +236,7 @@ See **[docs/resolution-service.md](docs/resolution-service.md)** for full docume
 make up
 ```
 
-This builds all Docker images and starts PostgreSQL, all four services, and Prometheus in one command. The public REST API is available at `http://localhost:8090`.
+This builds all Docker images and starts PostgreSQL, all four services, Prometheus, and Grafana in one command. The public REST API is available at `http://localhost:8090`. Grafana dashboards are available at `http://localhost:3000` (anonymous viewer access, no login required).
 
 ### Option B — Local binaries + Docker postgres
 
@@ -486,7 +486,7 @@ make docker        # build Docker image (from repo root)
 | Resolution Service (Go) | ✅ Complete |
 | API Gateway (Go) | ✅ Complete |
 | Docker Compose (full stack) | ✅ Complete |
-| Observability stack (Grafana/ELK) | 🚧 Planned |
+| Observability stack (Grafana/Prometheus) | ✅ Complete |
 
 ---
 

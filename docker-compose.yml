@@ -6,10 +6,11 @@
 # Services and their ports:
 #   postgres    — 5432
 #   ingestion   — gRPC :50051 | HTTP :8080 | metrics :9090
-#   engine      — gRPC :50052 | metrics :8081
+#   engine      — gRPC :50052 | metrics :9091
 #   resolution  — gRPC :50053 | HTTP :8082 | metrics :9092
 #   gateway     — HTTP :8090  | metrics :9093   ← your public entry point
 #   prometheus  — :9191
+#   grafana     — :3000                         ← dashboards (anonymous viewer)
 #
 # To run a specific service and its dependencies only:
 #   docker compose up gateway
@@ -155,6 +156,21 @@ services:
       <<: *healthcheck
       test: ["CMD-SHELL", "wget -qO- http://localhost:8090/health || exit 1"]
 
+  # ── Grafana ─────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.0.0
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
   # ── Prometheus ──────────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.54.0
@@ -176,3 +192,4 @@ services:
 volumes:
   postgres_data:
   prometheus_data:
+  grafana_data:
