@@ -222,3 +222,128 @@ jobs:
             echo "======== $svc ========"
             cat "/tmp/${svc}.log" 2>/dev/null || echo "(no log)"
           done
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: Integration test suite — Go tests in tests/integration/ that
+  # exercise the full stack end-to-end via the gateway REST API.
+  #
+  # Uses correct env var names for each service (the legacy `integration` job
+  # above has incorrect names and is kept only for backward compatibility).
+  # ─────────────────────────────────────────────────────────────────────────
+  integration-tests:
+    name: Integration Test Suite
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    # Skip gracefully until all four services and the test module exist.
+    if: >
+      hashFiles('services/ingestion/go.mod')    != '' &&
+      hashFiles('services/resolution/go.mod')   != '' &&
+      hashFiles('services/gateway/go.mod')       != '' &&
+      hashFiles('services/engine/Cargo.toml')    != '' &&
+      hashFiles('tests/integration/go.mod')      != ''
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER:     reconx
+          POSTGRES_PASSWORD: reconx
+          POSTGRES_DB:       reconx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Set up Rust (${{ env.RUST_TOOLCHAIN }})
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Rust dependency cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/engine -> target
+
+      # ── Build all service binaries ──────────────────────────────────────
+      - name: Build Go service binaries
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          cd "$GITHUB_WORKSPACE/services/ingestion"  && go build -o "$GITHUB_WORKSPACE/bin/reconx-ingestion"  .
+          cd "$GITHUB_WORKSPACE/services/resolution" && go build -o "$GITHUB_WORKSPACE/bin/reconx-resolution" .
+          cd "$GITHUB_WORKSPACE/services/gateway"    && go build -o "$GITHUB_WORKSPACE/bin/reconx-gateway"    .
+
+      - name: Build engine binary (Rust, release)
+        run: cargo build --release
+        working-directory: services/engine
+
+      # ── Start services with correct env var names ───────────────────────
+      - name: Start services
+        run: |
+          DSN="postgres://reconx:reconx@localhost:5432/reconx?sslmode=disable"
+
+          RECONX_DATABASE_DSN="$DSN" \
+          RECONX_GRPC_PORT="50051" \
+          RECONX_HTTP_PORT="8080" \
+          RECONX_KAFKA_ENABLED="false" \
+            "$GITHUB_WORKSPACE/bin/reconx-ingestion" > /tmp/ingestion.log 2>&1 &
+
+          RECONX_ENGINE__DATABASE__DSN="$DSN" \
+          RECONX_ENGINE__GRPC__PORT="50052" \
+            "$GITHUB_WORKSPACE/services/engine/target/release/reconx-engine" > /tmp/engine.log 2>&1 &
+
+          RECONX_RESOLUTION_DATABASE_DSN="$DSN" \
+          RECONX_RESOLUTION_GRPC_PORT="50053" \
+          RECONX_RESOLUTION_HTTP_PORT="8082" \
+          RECONX_RESOLUTION_ENGINE_ADDRESS="localhost:50052" \
+          RECONX_RESOLUTION_RETRY_POLL_INTERVAL_SECS="2" \
+            "$GITHUB_WORKSPACE/bin/reconx-resolution" > /tmp/resolution.log 2>&1 &
+
+          RECONX_GATEWAY_HTTP_PORT="8090" \
+          RECONX_GATEWAY_INGESTION_ADDRESS="localhost:50051" \
+          RECONX_GATEWAY_ENGINE_ADDRESS="localhost:50052" \
+          RECONX_GATEWAY_RESOLUTION_ADDRESS="localhost:50053" \
+          RECONX_GATEWAY_RESOLUTION_HTTP_ADDRESS="http://localhost:8082" \
+            "$GITHUB_WORKSPACE/bin/reconx-gateway" > /tmp/gateway.log 2>&1 &
+
+      - name: Wait for gateway to be healthy
+        run: |
+          echo "Polling http://localhost:8090/health …"
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8090/health; then
+              echo ""
+              echo "Gateway is ready."
+              break
+            fi
+            echo "  attempt $i/30 — retrying in 3 s"
+            sleep 3
+          done
+
+      # ── Run the Go integration test suite ──────────────────────────────
+      - name: Run integration tests
+        working-directory: tests/integration
+        env:
+          INTEGRATION_GATEWAY_URL:  http://localhost:8090
+          INTEGRATION_POLL_TIMEOUT: 90s
+          INTEGRATION_POLL_INTERVAL: 2s
+        run: go test -v -timeout 300s ./...
+
+      # ── Dump logs on failure ────────────────────────────────────────────
+      - name: Dump service logs
+        if: failure()
+        run: |
+          for svc in ingestion engine resolution gateway; do
+            echo "======== $svc ========"
+            cat "/tmp/${svc}.log" 2>/dev/null || echo "(no log)"
+          done
