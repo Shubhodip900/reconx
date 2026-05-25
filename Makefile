@@ -27,6 +27,7 @@
         build-all build-ingestion build-engine build-resolution build-gateway \
         run-all run-ingestion run-engine run-resolution run-gateway \
         test-all test-ingestion test-engine test-resolution test-gateway \
+        test-integration \
         lint-all proto help
 
 # ── Full-stack Docker Compose ─────────────────────────────────────────────────
@@ -103,6 +104,12 @@ run-postgres:
 
 ## test-all: Run tests for every service
 test-all: test-ingestion test-engine test-resolution test-gateway
+
+## test-integration: Run integration tests against a running stack (requires services to be up)
+## Override INTEGRATION_GATEWAY_URL to target a different gateway (default: http://localhost:8090).
+## Example: make test-integration INTEGRATION_GATEWAY_URL=http://localhost:8090
+test-integration:
+	cd tests/integration && go test -v -timeout 120s ./...
 
 test-ingestion:
 	$(MAKE) -C services/ingestion test
